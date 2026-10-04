@@ -1,5 +1,5 @@
 # disease-mapping-direct-travel
-Data and R code for BSc (Hons) Research Report: The effect of including direct-travel-neighbours in hierarchical Bayesian models for disease mapping
+Data and R code for BSc (Hons) Research Report: The effect of including direct-travel neighbours in hierarchical Bayesian models for disease mapping
 ---
 
 ## 📁 Repository Contents

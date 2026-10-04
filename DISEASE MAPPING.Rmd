@@ -1,0 +1,498 @@
+---
+title: "Bayesian disease mapping"
+author: "JPM MOLLER u23532204"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Loading the required packages}
+library(INLA)
+library(sf)
+library(spdep)
+library(spData)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+```
+
+```{r Case 1 Neighbourhood structure}
+data("us_states", package = "spData")
+map_sf <- us_states %>% 
+  arrange(NAME)
+
+nb <- poly2nb(map_sf, queen = TRUE)
+nb2INLA("state_graph.adj", nb)
+g <- inla.read.graph("state_graph.adj")
+```
+
+```{r Case 1 adjacency-plot, message=FALSE, warning=FALSE, echo=FALSE, fig.width=8, fig.height=8}
+library(spdep)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+adj_mat <- nb2mat(nb, style = "B", zero.policy = TRUE)
+rownames(adj_mat) <- map_sf$NAME
+colnames(adj_mat) <- map_sf$NAME
+
+adj_df <- as.data.frame(adj_mat) %>%
+  mutate(State1 = factor(rownames(.), levels = rev(map_sf$NAME))) %>% 
+  pivot_longer(cols = -State1, names_to = "State2", values_to = "Neighbor")
+
+ggplot(adj_df, aes(x = State2, y = State1, fill = factor(Neighbor))) +
+  geom_tile(color = "grey80", linewidth = 0.1) +
+  scale_fill_manual(
+    values = c("0" = "#f8f9fa", "1" = "#2b8cbe"),
+    labels = c("No", "Adjacent (Queen)"),
+    name = "Contiguity"
+  ) +
+  labs(
+    title = "State Adjacency Matrix (Queen Contiguity)",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6),
+    axis.text.y = element_text(size = 6),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  coord_fixed()
+```
+```{r Loading the data set}
+data_inla <- read_excel("covid_data.xlsx") %>%
+  filter(
+    !is.na(y), 
+    !is.na(Adult_population),
+    !is.na(median_income), 
+    !is.na(median_age),
+    !is.na(no_health_insurance_percentage), 
+    !is.na(gini_index),
+    !is.na(workers_use_public_transport), 
+    !is.na(vac_rate)
+  ) %>%
+  mutate(
+    y           = round(y),
+    s_income    = as.vector(scale(median_income)),
+    s_age       = as.vector(scale(median_age)),
+    s_uninsured = as.vector(scale(no_health_insurance_percentage)),
+    s_gini      = as.vector(scale(gini_index)),
+    s_transit   = as.vector(scale(workers_use_public_transport)),
+    s_vac       = as.vector(scale(vac_rate))
+  )
+
+if ("state_name" %in% colnames(data_inla)) {
+  data_inla <- data_inla %>% arrange(state_name)
+}
+data_inla$state_id <- 1:nrow(data_inla)
+
+overall_rate <- sum(data_inla$y) / sum(data_inla$Adult_population)
+data_inla <- data_inla %>%
+  mutate(E = Adult_population * overall_rate)
+head(data_inla)
+```
+```{r Define BYM2 model formula and execute INLA for Case 1}
+formula_bym2 <- y ~ 1 + 
+  s_income + s_age + s_uninsured + 
+  s_gini + s_transit + s_vac + 
+  f(state_id, 
+    model = "bym2", 
+    graph = g, 
+    scale.model = TRUE, 
+    adjust.for.con.comp = TRUE)
+
+bym2_fit <- inla(
+  formula           = formula_bym2,
+  family            = "poisson",
+  data              = data_inla,
+  E                 = E,
+  control.predictor = list(compute = TRUE, link = 1),
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE)
+)
+
+summary(bym2_fit)
+```
+```{r Top 10 risky states under Case 1}
+data_inla <- data_inla %>%
+  mutate(
+    RR_mean = bym2_fit$summary.fitted.values$mean,
+    RR_q025 = bym2_fit$summary.fitted.values$`0.025quant`,
+    RR_q975 = bym2_fit$summary.fitted.values$`0.975quant`
+  )
+
+top_risk_states <- data_inla %>%
+  dplyr::select(state_id, dplyr::any_of("state_name"), RR_mean, RR_q025, RR_q975) %>%
+  arrange(desc(RR_mean)) %>%
+  head(10)
+
+print(top_risk_states)
+
+```
+```{r Spatial choropleth map of Case 1}
+map_sf_plotted <- map_sf %>%
+  dplyr::select(NAME, geometry) %>%
+  bind_cols(data_inla)
+
+ggplot(map_sf_plotted) +
+  geom_sf(aes(fill = RR_mean), color = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(
+    option = "magma", 
+    name = "Relative Risk (θ)",
+    direction = -1
+  ) +
+  labs(
+    title = "Bayesian Relative Risk of COVID-19 Hospitalizations",
+    subtitle = "BYM2 Spatial Poisson Model Estimates",
+    caption = "Baseline Risk = 1.0 (Higher values indicate elevated hospitalization risk)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+```{r Creating the neighbourhood structure for Case 2}
+NM_2 <- inla.read.graph("state_graph.adj")
+#Alabama
+NM_2[["nbs"]][[1]] <- sort(unique(c(NM_2[["nbs"]][[1]], 17L, 23L, 7L, 8L, 10L, 19L, 29L, 31L, 32L, 37L, 39L, 45L)))
+
+#Arizona
+NM_2[["nbs"]][[2]] <- sort(unique(c(NM_2[["nbs"]][[2]], 3L, 12L, 14L, 15L, 17L, 24L, 42L)))
+
+#Arkansas
+NM_2[["nbs"]][[3]] <- sort(unique(c(NM_2[["nbs"]][[3]], 2L, 4L, 12L, 30L)))
+
+#California
+NM_2[["nbs"]][[4]] <- sort(unique(c(NM_2[["nbs"]][[4]], 5L, 12L, 14L, 26L, 43L, 46L, 15L, 24L, 30L, 17L, 42L, 3L)))
+
+#Colorado
+NM_2[["nbs"]][[5]] <- sort(unique(c(NM_2[["nbs"]][[5]], 4L, 12L, 14L, 26L, 27L, 43L, 2L, 4L, 12L, 14L, 15L, 24L, 30L)))
+
+#Connecticut
+NM_2[["nbs"]][[6]] <- sort(unique(c(NM_2[["nbs"]][[6]], 7L, 8L, 19L, 29L, 31L, 37L, 38L, 20L, 45L, 28L, 44L)))
+
+#Delaware
+NM_2[["nbs"]][[7]] <- sort(unique(c(NM_2[["nbs"]][[7]], 9L, 28L, 44L, 6L, 8L, 19L, 29L, 31L, 37L, 38L, 12L, 13L, 16L, 19L, 29L, 31L, 34L, 37L, 45L, 47L, 32L, 1L, 8L, 10L, 17L, 19L, 23L, 29L, 31L, 32L, 37L, 39L, 45L, 6L, 20L, 38L)))
+
+#District of Columbia
+NM_2[["nbs"]][[8]] <- sort(unique(c(NM_2[["nbs"]][[8]], 16L, 6L, 7L, 19L, 29L, 31L, 37L, 38L, 7L, 19L, 29L, 31L, 32L, 37L, 45L, 1L, 7L, 10L, 17L, 19L, 23L, 29L, 31L, 32L, 37L, 39L, 45L, 9L, 10L, 12L, 13L, 19L, 32L, 34L, 37L, 39L, 45L, 47L, 6L, 7L, 19L, 20L, 29L, 31L, 37L, 38L, 45L, 28L, 29L, 31L, 37L, 44L)))
+
+#Florida
+NM_2[["nbs"]][[9]] <- sort(unique(c(NM_2[["nbs"]][[9]], 45L, 8L, 10L, 12L, 13L, 19L, 32L, 34L, 37L, 39L, 45L, 47L, 7L, 8L, 10L, 19L, 29L, 31L, 32L, 37L, 39L, 45L)))
+
+#Georgia
+NM_2[["nbs"]][[10]] <- sort(unique(c(NM_2[["nbs"]][[10]], 1L, 7L, 8L, 17L, 19L, 23L, 29L, 31L, 32L, 37L, 39L, 45L, 8L, 9L, 12L, 13L, 19L, 32L, 34L, 37L, 45L, 47L, 8L, 9L, 19L, 29L, 31L, 32L, 37L, 39L, 45L)))
+
+#Idaho
+NM_2[["nbs"]][[11]] <- sort(unique(c(NM_2[["nbs"]][[11]], 12L, 22L, 25L, 33L, 36L, 46L, 48L)))
+
+#Illinois
+NM_2[["nbs"]][[12]] <- sort(unique(c(NM_2[["nbs"]][[12]], 22L, 48L, 4L, 5L, 14L, 26L, 27L, 43L, 7L, 8L, 13L, 16L, 19L, 29L, 31L, 34L, 37L, 45L, 47L, 16L, 17L, 23L, 41L, 11L, 22L, 25L, 33L, 36L, 46L, 48L, 8L, 9L, 10L, 13L, 19L, 32L, 34L, 37L, 39L, 45L, 47L, 48L, 13L, 20L, 31L, 34L, 37L, 24L, 13L, 21L, 2L, 4L, 5L, 14L, 15L, 24L, 30L, 2L, 3L, 4L, 24L, 30L, 42L)))
+
+#Indiana
+NM_2[["nbs"]][[13]] <- sort(unique(c(NM_2[["nbs"]][[13]], 7L, 8L, 12L, 16L, 19L, 29L, 31L, 34L, 37L, 45L, 47L, 8L, 9L, 10L, 12L, 19L, 32L, 34L, 37L, 39L, 45L, 47L, 12L, 20L, 31L, 34L, 37L, 12L, 21L)))
+
+#Iowa
+NM_2[["nbs"]][[14]] <- sort(unique(c(NM_2[["nbs"]][[14]], 4L, 5L, 12L, 26L, 27L, 43L, 2L, 4L, 5L, 12L, 15L, 24L, 30L)))
+
+#Kansas
+NM_2[["nbs"]][[15]] <- sort(unique(c(NM_2[["nbs"]][[15]], 2L, 4L, 5L, 12L, 14L, 24L, 30L)))
+
+#Kentucky
+NM_2[["nbs"]][[16]] <- sort(unique(c(NM_2[["nbs"]][[16]], 7L, 8L, 12L, 13L, 19L, 29L, 31L, 34L, 37L, 45L, 47L, 17L, 23L, 41L))) # 1 was removed here
+
+#Louisiana
+NM_2[["nbs"]][[17]] <- sort(unique(c(NM_2[["nbs"]][[17]], 1L, 23L, 12L, 16L, 23L, 41L, 1L, 7L, 8L, 10L, 19L, 23L, 29L, 31L, 32L, 37L, 39L, 45L, 2L, 4L, 30L, 42L)))
+
+#Maine
+NM_2[["nbs"]][[18]] <- sort(unique(c(NM_2[["nbs"]][[18]], 20L, 28L)))
+
+#Maryland
+NM_2[["nbs"]][[19]] <- sort(unique(c(NM_2[["nbs"]][[19]], 6L, 7L, 8L, 29L, 31L, 37L, 38L, 7L, 8L, 12L, 13L, 16L, 29L, 31L, 34L, 37L, 45L, 47L, 7L, 8L, 29L, 31L, 32L, 37L, 45L, 1L, 7L, 8L, 10L, 17L, 23L, 29L, 31L, 32L, 37L, 39L, 45L, 8L, 9L, 10L, 12L, 13L, 32L, 34L, 37L, 39L, 45L, 47L, 6L, 7L, 8L, 20L, 29L, 31L, 37L, 38L, 45L, 28L, 44L)))
+
+#Massachusetts
+NM_2[["nbs"]][[20]] <- sort(unique(c(NM_2[["nbs"]][[20]], 6L, 31L, 18L, 28L, 12L, 13L, 31L, 34L, 37L, 6L, 7L, 8L, 19L, 29L, 31L, 37L, 38L, 45L, 44L)))
+
+#Michigan
+NM_2[["nbs"]][[21]] <- sort(unique(c(NM_2[["nbs"]][[21]], 12L)))
+
+#Minnesota
+NM_2[["nbs"]][[22]] <- sort(unique(c(NM_2[["nbs"]][[22]], 11L, 12L, 25L, 33L, 36L, 46L, 48L)))
+
+#Mississippi
+NM_2[["nbs"]][[23]] <- sort(unique(c(NM_2[["nbs"]][[23]], 1L, 17L, 12L, 16L, 17L, 41L, 1L, 7L, 8L, 10L, 17L, 19L, 29L, 31L, 32L, 37L, 39L, 45L)))
+
+#Missouri
+NM_2[["nbs"]][[24]] <- sort(unique(c(NM_2[["nbs"]][[24]], 12L, 2L, 4L, 5L, 12L, 14L, 15L, 30L, 2L, 3L, 4L, 42L)))
+
+#Montana
+NM_2[["nbs"]][[25]] <- sort(unique(c(NM_2[["nbs"]][[25]], 11L, 12L, 22L, 33L, 36L, 46L, 48L)))
+
+#Nebraska
+NM_2[["nbs"]][[26]] <- sort(unique(c(NM_2[["nbs"]][[26]], 4L, 5L, 12L, 14L, 27L, 43L)))
+
+#Nevada
+NM_2[["nbs"]][[27]] <- sort(unique(c(NM_2[["nbs"]][[27]], 4L, 5L, 12L, 14L, 26L, 43L)))
+
+#New Hampshire
+NM_2[["nbs"]][[28]] <- sort(unique(c(NM_2[["nbs"]][[28]], 18L, 20L, 6L, 7L, 8L, 19L, 20L, 29L, 31L, 37L, 44L)))
+
+#New Jersey
+NM_2[["nbs"]][[29]] <- sort(unique(c(NM_2[["nbs"]][[29]], 6L, 7L, 8L, 19L, 31L, 37L, 38L, 12L, 13L, 16L, 19L, 31L, 34L, 37L, 45L, 47L, 32L, 1L, 10L, 17L, 19L, 23L, 31L, 32L, 37L, 39L, 45L, 6L, 19L, 20L, 9L, 28L, 44L)))
+
+#New Mexico
+NM_2[["nbs"]][[30]] <- sort(unique(c(NM_2[["nbs"]][[30]], 2L, 4L, 5L, 12L, 14L, 15L, 24L, 17L, 42L, 3L)))
+
+#New York
+NM_2[["nbs"]][[31]] <- sort(unique(c(NM_2[["nbs"]][[31]], 6L, 7L, 8L, 19L, 29L, 37L, 38L, 20L, 7L, 8L, 12L, 13L, 16L, 19L, 29L, 34L, 37L, 45L, 47L, 32L, 1L, 10L, 17L, 23L, 32L, 39L, 9L, 28L, 44L)))
+
+#North Carolina
+NM_2[["nbs"]][[32]] <- sort(unique(c(NM_2[["nbs"]][[32]], 7L, 8L, 19L, 29L, 31L, 37L, 45L, 1L, 7L, 8L, 10L, 17L, 19L, 23L, 29L, 31L, 37L, 39L, 45L, 9L, 10L, 12L, 13L, 19L, 34L, 37L, 39L, 45L, 47L, 7L, 8L, 9L, 10L, 19L, 29L, 31L, 37L, 39L, 45L)))
+
+#North Dakota
+NM_2[["nbs"]][[33]] <- sort(unique(c(NM_2[["nbs"]][[33]], 11L, 12L, 22L, 25L, 36L, 46L, 48L)))
+
+#Ohio
+NM_2[["nbs"]][[34]] <- sort(unique(c(NM_2[["nbs"]][[34]], 7L, 8L, 12L, 13L, 16L, 19L, 29L, 31L, 37L, 45L, 47L, 9L, 10L, 12L, 13L, 19L, 32L, 37L, 39L, 45L, 47L, 12L, 13L, 20L, 31L, 37L)))
+
+#Oklahoma
+NM_2[["nbs"]][[35]] <- sort(unique(c(NM_2[["nbs"]][[35]], 42L)))
+
+#Oregon
+NM_2[["nbs"]][[36]] <- sort(unique(c(NM_2[["nbs"]][[36]], 46L, 4L, 46L, 11L, 12L, 22L, 25L, 33L, 46L, 48L)))
+
+#Pennsylvania
+NM_2[["nbs"]][[37]] <- sort(unique(c(NM_2[["nbs"]][[37]], 6L, 7L, 8L, 19L, 29L, 31L, 38L, 7L, 8L, 12L, 13L, 16L, 19L, 29L, 31L, 34L, 45L, 47L, 1L, 7L, 8L, 10L, 17L, 19L, 23L, 29L, 31L, 32L, 39L, 45L, 8L, 9L, 10L, 12L, 13L, 19L, 32L, 34L, 39L, 45L, 47L, 29L, 31L, 12L, 13L, 20L, 31L, 34L, 6L, 7L, 8L, 19L, 20L, 29L, 31L, 38L, 45L, 29L, 31L, 7L, 8L, 9L, 10L, 19L, 29L, 31L, 32L, 39L, 45L, 6L, 7L, 8L, 19L, 20L, 28L, 29L, 31L, 44L, 7L, 8L, 19L, 29L, 31L, 32L, 45L)))
+
+#Rhode Island
+NM_2[["nbs"]][[38]] <- sort(unique(c(NM_2[["nbs"]][[38]], 6L, 7L, 8L, 19L, 29L, 31L, 37L, 6L, 7L, 8L, 19L, 20L, 29L, 31L, 37L, 45L)))
+
+#South Carolina
+NM_2[["nbs"]][[39]] <- sort(unique(c(NM_2[["nbs"]][[39]], 1L, 7L, 8L, 10L, 17L, 19L, 23L, 29L, 31L, 32L, 37L, 45L, 8L, 9L, 10L, 12L, 13L, 19L, 32L, 34L, 37L, 45L, 47L, 7L, 8L, 9L, 10L, 19L, 29L, 31L, 32L, 45L)))
+
+#South Dakota
+# NM_2[["nbs"]][[40]] <- sort(unique(c(NM_2[["nbs"]][[40]], ...)))
+
+#Tennessee
+NM_2[["nbs"]][[41]] <- sort(unique(c(NM_2[["nbs"]][[41]], 12L, 16L, 17L, 23L)))
+
+#Texas
+NM_2[["nbs"]][[42]] <- sort(unique(c(NM_2[["nbs"]][[42]], 35L, 2L, 4L, 17L, 30L, 3L, 12L, 24L, 30L)))
+
+#Utah
+NM_2[["nbs"]][[43]] <- sort(unique(c(NM_2[["nbs"]][[43]], 4L, 5L, 12L, 14L, 26L, 27L)))
+
+#Vermont
+NM_2[["nbs"]][[44]] <- sort(unique(c(NM_2[["nbs"]][[44]], 6L, 7L, 8L, 19L, 20L, 28L, 29L, 31L, 37L)))
+
+#Virginia
+NM_2[["nbs"]][[45]] <- sort(unique(c(NM_2[["nbs"]][[45]], 1L, 9L, 7L, 8L, 12L, 13L, 16L, 19L, 29L, 31L, 34L, 37L, 47L, 7L, 8L, 19L, 29L, 31L, 37L, 17L, 8L, 10L, 17L, 19L, 23L, 29L, 31L, 32L, 37L, 39L, 8L, 9L, 10L, 12L, 13L, 19L, 32L, 34L, 37L, 39L, 47L, 6L, 7L, 8L, 19L, 20L, 29L, 31L, 37L, 38L, 7L, 8L, 9L, 10L, 19L, 29L, 31L, 32L, 37L, 39L)))
+
+#Washington
+NM_2[["nbs"]][[46]] <- sort(unique(c(NM_2[["nbs"]][[46]], 4L, 36L, 11L, 12L, 22L, 25L, 33L, 36L, 48L)))
+
+#West Virginia
+NM_2[["nbs"]][[47]] <- sort(unique(c(NM_2[["nbs"]][[47]], 7L, 8L, 12L, 13L, 16L, 19L, 29L, 31L, 34L, 37L, 45L, 8L, 9L, 10L, 12L, 13L, 19L, 32L, 34L, 37L, 39L, 45L)))
+
+#Wisconsin
+NM_2[["nbs"]][[48]] <- sort(unique(c(NM_2[["nbs"]][[48]], 12L, 22L, 11L, 12L, 22L, 25L, 33L, 36L, 46L)))
+
+#Wyoming
+# NM_2[["nbs"]][[49]] <- sort(unique(c(NM_2[["nbs"]][[49]], ...)))
+```
+
+```{r Validating the neighbourhood structure}
+ class(NM_2[["nbs"]]) <- "nb"
+ spdep::is.symmetric.nb(NM_2[["nbs"]], verbose = TRUE) #if true it means the neighbourhood matrix is symmetric
+
+ # Export modified graph to file and read into INLA
+ spdep::nb2INLA("state_graph_custom.adj", NM_2[["nbs"]])
+ g_custom <- INLA::inla.read.graph("state_graph_custom.adj")
+```
+```{r Case 2 adjacency-plot, message=FALSE, warning=FALSE, echo=FALSE, fig.width=8, fig.height=8}
+library(spdep)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+adj_mat_custom <- nb2mat(NM_2[["nbs"]], style = "B", zero.policy = TRUE)
+rownames(adj_mat_custom) <- map_sf$NAME
+colnames(adj_mat_custom) <- map_sf$NAME
+
+adj_df_custom <- as.data.frame(adj_mat_custom) %>%
+  mutate(State1 = factor(rownames(.), levels = rev(map_sf$NAME))) %>% 
+  pivot_longer(cols = -State1, names_to = "State2", values_to = "Neighbor")
+
+ggplot(adj_df_custom, aes(x = State2, y = State1, fill = factor(Neighbor))) +
+  geom_tile(color = "grey80", linewidth = 0.1) +
+  scale_fill_manual(
+    values = c("0" = "#f8f9fa", "1" = "#2b8cbe"),
+    labels = c("No", "Adjacent (Custom)"),
+    name = "Contiguity"
+  ) +
+  labs(
+    title = "Modified State Adjacency Matrix (Custom Graph)",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6),
+    axis.text.y = element_text(size = 6),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  coord_fixed()
+```
+
+```{r Define BYM2 model formula and execute INLA for Case 2}
+ formula_bym2_custom <- y ~ 1 + 
+   s_income + s_age + s_uninsured + 
+   s_gini + s_transit + s_vac + 
+   f(state_id, 
+     model = "bym2", 
+     graph = g_custom, 
+     scale.model = TRUE, 
+     adjust.for.con.comp = TRUE)
+ 
+ bym2_custom_fit <- inla(
+   formula           = formula_bym2_custom,
+   family            = "poisson",
+   data              = data_inla,
+   E                 = E,
+   control.predictor = list(compute = TRUE, link = 1),
+   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE)
+ )
+ 
+ summary(bym2_custom_fit)
+```
+```{r Top 10 risky states under Case 2}
+ data_inla <- data_inla %>%
+   mutate(
+     RR_mean_custom = bym2_custom_fit$summary.fitted.values$mean,
+     RR_q025_custom = bym2_custom_fit$summary.fitted.values$`0.025quant`,
+     RR_q975_custom = bym2_custom_fit$summary.fitted.values$`0.975quant`
+   )
+ 
+ # Display top 10 highest-risk states
+ top_risk_custom <- data_inla %>%
+   dplyr::select(state_id, dplyr::any_of("state_name"), RR_mean_custom, RR_q025_custom, RR_q975_custom) %>%
+   arrange(desc(RR_mean_custom)) %>%
+   head(10)
+ 
+ print(top_risk_custom)
+```
+```{r Spatial choropleth map of Case 1}
+ map_sf_updated <- map_sf %>%
+   dplyr::select(NAME, geometry) %>%
+   bind_cols(data_inla)
+ 
+ ggplot(map_sf_updated) +
+   geom_sf(aes(fill = RR_mean_custom), color = "white", linewidth = 0.2) +
+   scale_fill_viridis_c(
+     option = "magma", 
+     name = "Relative Risk (θ)",
+     direction = -1
+   ) +
+   labs(
+     title = "Bayesian Relative Risk of COVID-19 Hospitalizations (AMTRAK Route)",
+     subtitle = "BYM2 Spatial Poisson Model Estimates",
+     caption = "Baseline Risk = 1.0 (Higher values indicate elevated risk)"
+   ) +
+   theme_minimal() +
+   theme(
+     legend.position = "right",
+     plot.title = element_text(face = "bold", size = 14)
+   )
+```
+```{r Data for standard deviation plots} 
+n_states <- nrow(data_inla)
+ state_names <- if ("state_name" %in% colnames(data_inla)) data_inla$state_name else map_sf$NAME
+ 
+ sd_case1 <- data.frame(
+   state = state_names,
+   SD    = bym2_fit$summary.random$state_id$sd[1:n_states],
+   Case  = "Case 1 (Standard Contiguity)"
+ )
+ 
+ sd_case2 <- data.frame(
+   state = state_names,
+   SD    = bym2_custom_fit$summary.random$state_id$sd[1:n_states],
+   Case  = "Case 2 (Custom Route Graph)"
+ )
+
+ sd_combined <- rbind(sd_case1, sd_case2)
+
+```
+
+```{r Violin box plots}
+ ggplot(sd_combined, aes(x = Case, y = SD, fill = Case)) +
+   geom_violin(alpha = 0.5) +
+   geom_boxplot(width = 0.15, fill = "white", color = "black", outlier.size = 1) +
+   scale_fill_brewer(palette = "Set2") +
+   theme_bw() +
+   labs(
+     title = "Spatial Random Effect Uncertainty: Case 1 vs. Case 2",
+     subtitle = "Posterior Standard Deviations (BYM2 Model) Across 49 US States",
+     x = "Graph Structure",
+     y = "Standard Deviation (SD)"
+   ) +
+   theme(
+     legend.position = "none",
+     plot.title = element_text(face = "bold", size = 13)
+   )
+```
+```{r State-by-state uncertainty comparison}
+ ordered_states <- sd_case1[order(sd_case1$SD), "state"]
+ sd_combined$state <- factor(sd_combined$state, levels = ordered_states)
+ 
+ ggplot(sd_combined, aes(x = state, y = SD, color = Case, group = Case)) +
+   geom_point(size = 2, alpha = 0.8) +
+   geom_line(alpha = 0.6, linewidth = 0.7) + 
+   scale_color_brewer(palette = "Set1") +
+   theme_bw() +
+   labs(
+     title = "State-by-State Uncertainty Comparison",
+     subtitle = "Ordered by Case 1 BYM2 Spatial Effect Uncertainty",
+     x = "State",
+     y = "Standard Deviation (SD)"
+   ) +
+   theme(
+     axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
+     legend.position = "bottom",
+     legend.title = element_blank(),
+     plot.title = element_text(face = "bold", size = 13)
+   )
+ 
+
+```
+```{r Relative risk comprison}
+state_names <- if ("state_name" %in% colnames(data_inla)) data_inla$state_name else map_sf$NAME
+ 
+ rr_comparison <- data.frame(
+   state    = state_names,
+   RR_Case1 = bym2_fit$summary.fitted.values$mean,
+   RR_Case2 = bym2_custom_fit$summary.fitted.values$mean
+ )
+
+ rr_comparison <- rr_comparison %>%
+   dplyr::mutate(
+     Diff     = RR_Case2 - RR_Case1,
+     Abs_Diff = abs(Diff)
+   )
+ 
+ ggplot(rr_comparison, aes(x = RR_Case1, y = RR_Case2)) +
+   geom_point(color = "steelblue", alpha = 0.7, size = 3) +
+   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") + # 1:1 reference line
+   theme_bw() +
+   labs(
+     title = "BYM2 Relative Risk (RR): Case 1 vs Case 2",
+     subtitle = "Points off the red dashed line indicate an RR shift due to custom route connections",
+     x = "Relative Risk - Case 1 (Standard Contiguity)",
+     y = "Relative Risk - Case 2 (Custom Route Graph)"
+   ) +
+   theme(
+     plot.title = element_text(face = "bold", size = 13)
+   )
+
+```
+

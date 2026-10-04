@@ -1,5 +1,5 @@
 # disease-mapping-direct-travel
-Data and R code for BSc (Hons) Research Report: Evaluating the impact of Amtrak direct-travel transit networks in scaled BYM2 spatial models using R-INLA.
+Data and R code for BSc (Hons) Research Report: The effect of including direct-travel-neighbours in hierarchical Bayesian models for disease mapping
 ---
 
 ## 📁 Repository Contents

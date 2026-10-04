@@ -31,6 +31,16 @@ The aggregated dataset **`covid_data.xlsx`** was constructed using three public 
    * **Link**: [CDC COVID-19 Vaccination Coverage Data](https://data.cdc.gov/Vaccinations/COVID-19-Vaccination-Coverage-Overall-and-by-Selec/ksfb-ug5d)
 
 ---
+🚀 Reproduction Steps
+1. Clone or download this repository to your computer.
+
+2. Ensure covid_data.xlsx and DISEASE MAPPING.Rmd are located in your active R working directory.
+
+3. Open DISEASE MAPPING.Rmd in RStudio.
+
+4. Run all code chunks or click Knit to run the spatial models and generate the report outputs.
+
+---
 
 ## 🛠️ Software Requirements & Dependencies
 
@@ -42,13 +52,5 @@ install.packages(c("readxl", "dplyr", "tidyr", "ggplot2", "sf", "spdep", "knitr"
 
 # 2. Install R-INLA from the official repository
 install.packages("INLA", repos = c(getOption("repos"), INLA = "[https://inla.r-inla-download.org/R/stable](https://inla.r-inla-download.org/R/stable)"), dep = TRUE)
+'''
 
----
-🚀 Reproduction Steps
-1. Clone or download this repository to your computer.
-
-2. Ensure covid_data.xlsx and DISEASE MAPPING.Rmd are located in your active R working directory.
-
-3. Open DISEASE MAPPING.Rmd in RStudio.
-
-4. Run all code chunks or click Knit to run the spatial models and generate the report outputs.
